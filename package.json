@@ -29,6 +29,7 @@
     "escape-string-regexp": "^4.0.0",
     "esprima": "^4.0.1",
     "extend-shallow": "^2.0.1",
+    "firebase": "^12.12.1",
     "generate-function": "^2.3.1",
     "graceful-fs": "^4.2.11",
     "htmlparser2": "^8.0.2",

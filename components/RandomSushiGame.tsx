@@ -1,11 +1,12 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useRouter } from 'next/router'
+import { ref, onValue, set } from 'firebase/database'
+import { getDb } from '../lib/firebase'
 import { PlayerType, MenuItem } from '../types/types'
 import PlayerList from './PlayerList'
 
 type Store = { name: string; url: string }
 
-const LOCAL_STORAGE_KEY = 'sushiGamePlayers'
 
 const DEFAULT_CATEGORIES = ['フェア', '握り', '軍艦・巻物', 'サイドメニュー', 'ドリンク', 'デザート']
 
@@ -105,6 +106,20 @@ const RandomSushiGame = () => {
     return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [])
 
+  // Firebase リアルタイム同期
+  useEffect(() => {
+    const unsubPlayers = onValue(ref(getDb(),'game/players'), snapshot => {
+      const val = snapshot.val()
+      if (!val) { setPlayers([]); return }
+      const arr = Array.isArray(val) ? val : Object.values(val)
+      setPlayers(arr.map((p: PlayerType) => ({ ...p, orders: p.orders ?? [] })))
+    })
+    const unsubRolls = onValue(ref(getDb(),'game/currentRolls'), snapshot => {
+      setCurrentRolls(snapshot.val() ?? {})
+    })
+    return () => { unsubPlayers(); unsubRolls() }
+  }, [])
+
   // プレイヤー追加
   const addPlayer = useCallback(() => {
     if (!newPlayerName.trim()) return
@@ -112,94 +127,64 @@ const RandomSushiGame = () => {
       setError('同じ名前のプレイヤーが既に存在します')
       return
     }
-    setPlayers(prev => [
-      ...prev,
-      { id: Date.now().toString(), name: newPlayerName.trim(), orders: [], totalAmount: 0 }
-    ])
+    const newPlayers = [...players, { id: Date.now().toString(), name: newPlayerName.trim(), orders: [], totalAmount: 0 }]
+    set(ref(getDb(),'game/players'), newPlayers)
     setNewPlayerName('')
     setError(null)
   }, [newPlayerName, players])
 
   // プレイヤー削除
   const removePlayer = useCallback((playerId: string) => {
-    setPlayers(prev => {
-      const player = prev.find(p => p.id === playerId)
-      if (player) {
-        setCurrentRolls(rolls => {
-          const newRolls = { ...rolls }
-          delete newRolls[player.name]
-          return newRolls
-        })
-      }
-      return prev.filter(p => p.id !== playerId)
-    })
-  }, [])
+    const player = players.find(p => p.id === playerId)
+    const newPlayers = players.filter(p => p.id !== playerId)
+    set(ref(getDb(),'game/players'), newPlayers.length > 0 ? newPlayers : null)
+    if (player) {
+      const newRolls = { ...currentRolls }
+      delete newRolls[player.name]
+      set(ref(getDb(),'game/currentRolls'), Object.keys(newRolls).length > 0 ? newRolls : null)
+    }
+  }, [players, currentRolls])
 
   // 寿司をランダムに選択する（重み付き）
   const rollSushi = useCallback(() => {
-    if (menuItems.length === 0) {
-      setError('メニューデータが取得できていません')
-      return
-    }
-    if (players.length === 0) {
-      setError('先にプレイヤーを追加してください')
-      return
-    }
-    setCurrentRolls(
-      players.reduce((acc, player) => {
-        acc[player.name] = weightedRandom(menuItems, categoryWeights)
-        return acc
-      }, {} as Record<string, MenuItem>)
-    )
+    if (menuItems.length === 0) { setError('メニューデータが取得できていません'); return }
+    if (players.length === 0) { setError('先にプレイヤーを追加してください'); return }
+    const newRolls = players.reduce((acc, player) => {
+      acc[player.name] = weightedRandom(menuItems, categoryWeights)
+      return acc
+    }, {} as Record<string, MenuItem>)
+    set(ref(getDb(),'game/currentRolls'), newRolls)
   }, [menuItems, players, categoryWeights])
 
   // 寿司を選択する
   const selectSushi = useCallback((playerName: string) => {
     if (!currentRolls[playerName]) return
-    setPlayers(prev =>
-      prev.map(player => {
-        if (player.name !== playerName) return player
-        const item = currentRolls[playerName]
-        return { ...player, orders: [...player.orders, item], totalAmount: player.totalAmount + item.price }
-      })
-    )
-    setCurrentRolls(prev => {
-      const newRolls = { ...prev }
-      delete newRolls[playerName]
-      return newRolls
+    const item = currentRolls[playerName]
+    const newPlayers = players.map(player => {
+      if (player.name !== playerName) return player
+      return { ...player, orders: [...player.orders, item], totalAmount: player.totalAmount + item.price }
     })
-  }, [currentRolls])
+    set(ref(getDb(),'game/players'), newPlayers)
+    const newRolls = { ...currentRolls }
+    delete newRolls[playerName]
+    set(ref(getDb(),'game/currentRolls'), Object.keys(newRolls).length > 0 ? newRolls : null)
+  }, [currentRolls, players])
 
   // 寿司をスキップする
   const skipSushi = useCallback((playerName: string) => {
-    setCurrentRolls(prev => {
-      const newRolls = { ...prev }
-      delete newRolls[playerName]
-      return newRolls
-    })
-  }, [])
-
-  // 初回ロード時にlocalStorageから復元
-  useEffect(() => {
-    const saved = localStorage.getItem(LOCAL_STORAGE_KEY)
-    if (saved) setPlayers(JSON.parse(saved))
-  }, [])
-
-  // playersをlocalStorageに保存
-  useEffect(() => {
-    if (players.length > 0) {
-      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(players))
-    }
-  }, [players])
+    const newRolls = { ...currentRolls }
+    delete newRolls[playerName]
+    set(ref(getDb(),'game/currentRolls'), Object.keys(newRolls).length > 0 ? newRolls : null)
+  }, [currentRolls])
 
   // ゲームリセット
   const resetGame = useCallback(() => {
     if (window.confirm('ゲームをリセットしますか？すべての注文履歴がクリアされます。')) {
-      setPlayers(prev => prev.map(p => ({ ...p, orders: [], totalAmount: 0 })))
-      setCurrentRolls({})
-      localStorage.removeItem(LOCAL_STORAGE_KEY)
+      const resetPlayers = players.map(p => ({ ...p, orders: [], totalAmount: 0 }))
+      set(ref(getDb(),'game/players'), resetPlayers.length > 0 ? resetPlayers : null)
+      set(ref(getDb(),'game/currentRolls'), null)
     }
-  }, [])
+  }, [players])
 
   // お会計
   const handleCheckout = useCallback(() => {
