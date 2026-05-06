@@ -69,15 +69,9 @@ const RandomSushiGame = () => {
     }
   }, [allStores])
 
-  // 店舗を選択してメニュー取得
-  const selectStore = useCallback(async (store: Store) => {
-    setSelectedStore(store)
-    setStoreInput(store.name)
-    setSuggestions([])
-    setShowSuggestions(false)
+  // メニューを取得する（内部用）
+  const fetchMenu = useCallback(async (store: Store) => {
     setMenuItems([])
-    setCategoryWeights(Object.fromEntries(DEFAULT_CATEGORIES.map(c => [c, '1'])))
-    setDraftWeights(Object.fromEntries(DEFAULT_CATEGORIES.map(c => [c, '1'])))
     setError(null)
     setIsLoading(true)
     try {
@@ -95,6 +89,16 @@ const RandomSushiGame = () => {
     }
   }, [])
 
+  // 店舗を選択して Firebase に保存 → 全クライアントが同期
+  const selectStore = useCallback((store: Store) => {
+    setStoreInput(store.name)
+    setSuggestions([])
+    setShowSuggestions(false)
+    setCategoryWeights(Object.fromEntries(DEFAULT_CATEGORIES.map(c => [c, '1'])))
+    setDraftWeights(Object.fromEntries(DEFAULT_CATEGORIES.map(c => [c, '1'])))
+    set(ref(getDb(), 'game/selectedStore'), store)
+  }, [])
+
   // サジェスト外クリックで閉じる
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -108,6 +112,13 @@ const RandomSushiGame = () => {
 
   // Firebase リアルタイム同期
   useEffect(() => {
+    const unsubStore = onValue(ref(getDb(), 'game/selectedStore'), snapshot => {
+      const store: Store | null = snapshot.val()
+      if (!store) return
+      setSelectedStore(store)
+      setStoreInput(store.name)
+      fetchMenu(store)
+    })
     const unsubPlayers = onValue(ref(getDb(), 'game/players'), snapshot => {
       const val = snapshot.val()
       if (!val) { setPlayers([]); return }
@@ -119,8 +130,8 @@ const RandomSushiGame = () => {
     const unsubRolls = onValue(ref(getDb(), 'game/currentRolls'), snapshot => {
       setCurrentRolls(snapshot.val() ?? {})
     })
-    return () => { unsubPlayers(); unsubRolls() }
-  }, [])
+    return () => { unsubStore(); unsubPlayers(); unsubRolls() }
+  }, [fetchMenu])
 
   // プレイヤー追加
   const addPlayer = useCallback(() => {
