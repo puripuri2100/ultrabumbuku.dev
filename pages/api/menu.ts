@@ -2,30 +2,35 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 import { MenuItem } from '../../types/types';
+import storesData from './sushiro_data/sushiro_all_shops.json';
 
 type MenuResponse = MenuItem[] | { error: string };
+type Store = { name: string; url: string };
 
-// 除外するキーワード一覧
-const EXCLUDE_KEYWORDS = [
-  '特上セット',
-  'スシローセット',
-  'まぐろサーモンセット',
-  'スシロー手巻セット',
-  '粉末緑茶',
-  '赤だし（カップ）',
-  '甘だれ'
+const TAKEOUT_KEYWORDS = ['お持ち帰り', 'テイクアウト'];
+
+const EXCLUDE_ITEM_NAMES = [
+  '生ビール', '生貯蔵酒', '翠', 'レモンサワー', 'ハイボール', 'オールフリー',
+  '特上セット', 'スシローセット', 'まぐろサーモンセット', 'スシロー手巻セット',
+  '粉末緑茶', '赤だし（カップ）', '甘だれ',
 ];
 
-function isTakeoutSet(name: string): boolean {
-  return EXCLUDE_KEYWORDS.some(keyword => name.includes(keyword));
-}
-
 export default async function handler(
-  req: NextApiRequest, 
+  req: NextApiRequest,
   res: NextApiResponse<MenuResponse>
 ) {
-  // 店舗は「つくば学園の森店」に固定
-  const menuUrl = 'https://www.akindo-sushiro.co.jp/menu/menu_detail/?s_id=528';
+  const { storeName } = req.query;
+
+  if (!storeName || typeof storeName !== 'string') {
+    return res.status(400).json({ error: '店舗名が指定されていません' });
+  }
+
+  const store = (storesData as Store[]).find(s => s.name === storeName);
+  if (!store) {
+    return res.status(404).json({ error: '店舗が見つかりません' });
+  }
+
+  const menuUrl = store.url.startsWith('https://') ? store.url : `https://${store.url}`;
 
   try {
     const menuResponse = await axios.get(menuUrl, {
@@ -36,24 +41,42 @@ export default async function handler(
     });
 
     const $ = cheerio.load(menuResponse.data);
-    const menuItems = $('.menu-item');
 
-    if (menuItems.length === 0) {
+    // カテゴリタブ: data-target → カテゴリ名
+    const categoryNames: Record<number, string> = {};
+    $('[class*="category-tab__item"]').each((_, el) => {
+      const target = $(el).attr('data-target');
+      const name = $(el).text().trim();
+      if (target !== undefined && name) {
+        categoryNames[parseInt(target)] = name;
+      }
+    });
+
+    // コンテンツ用 swiper-slide のみ対象（category-tab__item と modal-container を除外）
+    const contentSlides = $('.swiper-slide').filter((_, el) => {
+      return !$(el).hasClass('category-tab__item') && !$(el).closest('.modal-container').length;
+    });
+
+    if (contentSlides.length === 0) {
       return res.status(404).json({ error: 'メニュー情報が見つかりませんでした' });
     }
 
     const menuList: MenuItem[] = [];
-    
-    menuItems.each((_, element) => {
-      const name = $(element).find('.menu-item__name').text().trim();
-      if (!name || isTakeoutSet(name)) return; // 除外
-      const priceText = $(element).find('.menu-item__price').text().replace(/\s+/g, '').trim();
-      // 価格テキストから数値のみを抽出
-      const cleanedPrice = priceText.replace(/[^0-9]/g, '');
-      const price = parseInt(cleanedPrice, 10);
-      if (name && !isNaN(price)) {
-        menuList.push({ name, price });
-      }
+
+    contentSlides.each((i, slide) => {
+      const catName = categoryNames[i] ?? 'その他';
+      if (TAKEOUT_KEYWORDS.some(kw => catName.includes(kw))) return;
+
+      $(slide).find('.menu-item').each((_, element) => {
+        const name = $(element).find('.menu-item__name').text().trim();
+        if (!name) return;
+        if (EXCLUDE_ITEM_NAMES.some(n => name.includes(n))) return;
+        const priceText = $(element).find('.menu-item__price').text().replace(/\s+/g, '').trim();
+        const price = parseInt(priceText.replace(/[^0-9]/g, ''), 10);
+        if (!isNaN(price)) {
+          menuList.push({ name, price, category: catName });
+        }
+      });
     });
 
     if (menuList.length === 0) {

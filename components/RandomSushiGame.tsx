@@ -1,12 +1,26 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { useRouter } from 'next/router'
 import { PlayerType, MenuItem } from '../types/types'
 import PlayerList from './PlayerList'
 
-/**
- * 無作為抽出寿司ゲームのメインコンポーネント
- * スシローのメニューからランダムに寿司を選び、プレイヤー間で楽しむゲーム
- */
+type Store = { name: string; url: string }
+
+const LOCAL_STORAGE_KEY = 'sushiGamePlayers'
+
+const DEFAULT_CATEGORIES = ['フェア', '握り', '軍艦・巻物', 'サイドメニュー', 'ドリンク', 'デザート']
+
+function weightedRandom(items: MenuItem[], weights: Record<string, string>): MenuItem {
+  const w = (cat: string) => Math.max(0, parseFloat(weights[cat]) || 0)
+  const total = items.reduce((sum, item) => sum + w(item.category), 0)
+  if (total === 0) return items[Math.floor(Math.random() * items.length)]
+  let rand = Math.random() * total
+  for (const item of items) {
+    rand -= w(item.category)
+    if (rand <= 0) return item
+  }
+  return items[items.length - 1]
+}
+
 const RandomSushiGame = () => {
   const [menuItems, setMenuItems] = useState<MenuItem[]>([])
   const [isLoading, setIsLoading] = useState(false)
@@ -14,115 +28,148 @@ const RandomSushiGame = () => {
   const [players, setPlayers] = useState<PlayerType[]>([])
   const [currentRolls, setCurrentRolls] = useState<Record<string, MenuItem>>({})
   const [newPlayerName, setNewPlayerName] = useState('')
+
+  // 店舗選択
+  const [allStores, setAllStores] = useState<Store[]>([])
+  const [storeInput, setStoreInput] = useState('')
+  const [suggestions, setSuggestions] = useState<Store[]>([])
+  const [selectedStore, setSelectedStore] = useState<Store | null>(null)
+  const [showSuggestions, setShowSuggestions] = useState(false)
+  const suggestionsRef = useRef<HTMLDivElement>(null)
+
+  const defaultWeights = Object.fromEntries(DEFAULT_CATEGORIES.map(c => [c, '1']))
+  // 確定済みの倍率（rollSushiで使用）
+  const [categoryWeights, setCategoryWeights] = useState<Record<string, string>>(defaultWeights)
+  // 編集中の下書き倍率
+  const [draftWeights, setDraftWeights] = useState<Record<string, string>>(defaultWeights)
+  const [showWeights, setShowWeights] = useState(false)
+  const [weightsApplied, setWeightsApplied] = useState(false)
+
   const router = useRouter()
-  
-  const LOCAL_STORAGE_KEY = 'sushiGamePlayers'
-  
-  // メニューデータ取得
-  const fetchMenu = useCallback(async (storeName: string) => {
-    if (!storeName.trim()) return
-    
-    setIsLoading(true)
+
+  // 店舗一覧を初回取得
+  useEffect(() => {
+    fetch('/api/stores')
+      .then(r => r.json())
+      .then((data: Store[]) => setAllStores(data))
+      .catch(() => setError('店舗一覧の取得に失敗しました'))
+  }, [])
+
+  // 入力変化で前方一致フィルタリング
+  const handleStoreInputChange = useCallback((value: string) => {
+    setStoreInput(value)
+    setSelectedStore(null)
+    if (value.trim()) {
+      setSuggestions(allStores.filter(s => s.name.startsWith(value.trim())).slice(0, 10))
+      setShowSuggestions(true)
+    } else {
+      setSuggestions([])
+      setShowSuggestions(false)
+    }
+  }, [allStores])
+
+  // 店舗を選択してメニュー取得
+  const selectStore = useCallback(async (store: Store) => {
+    setSelectedStore(store)
+    setStoreInput(store.name)
+    setSuggestions([])
+    setShowSuggestions(false)
+    setMenuItems([])
+    setCategoryWeights(Object.fromEntries(DEFAULT_CATEGORIES.map(c => [c, '1'])))
+    setDraftWeights(Object.fromEntries(DEFAULT_CATEGORIES.map(c => [c, '1'])))
     setError(null)
-    
+    setIsLoading(true)
     try {
-      const response = await fetch(`/api/menu?storeName=${encodeURIComponent(storeName.trim())}`)
+      const response = await fetch(`/api/menu?storeName=${encodeURIComponent(store.name)}`)
       const data = await response.json()
-      
       if (response.ok) {
         setMenuItems(data)
       } else {
         setError(data.error || 'メニューの取得に失敗しました')
       }
-    } catch (err) {
+    } catch {
       setError('メニューの取得中にエラーが発生しました')
     } finally {
       setIsLoading(false)
     }
   }, [])
-  
+
+  // サジェスト外クリックで閉じる
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (suggestionsRef.current && !suggestionsRef.current.contains(e.target as Node)) {
+        setShowSuggestions(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [])
+
   // プレイヤー追加
   const addPlayer = useCallback(() => {
-    if (newPlayerName.trim()) {
-      const playerExists = players.some(p => p.name === newPlayerName.trim())
-      
-      if (playerExists) {
-        setError('同じ名前のプレイヤーが既に存在します')
-        return
-      }
-      
-      setPlayers(prev => [
-        ...prev,
-        {
-          id: Date.now().toString(),
-          name: newPlayerName.trim(),
-          orders: [],
-          totalAmount: 0,
-          showTotal: true
-        }
-      ])
-      setNewPlayerName('')
-      setError(null)
+    if (!newPlayerName.trim()) return
+    if (players.some(p => p.name === newPlayerName.trim())) {
+      setError('同じ名前のプレイヤーが既に存在します')
+      return
     }
+    setPlayers(prev => [
+      ...prev,
+      { id: Date.now().toString(), name: newPlayerName.trim(), orders: [], totalAmount: 0 }
+    ])
+    setNewPlayerName('')
+    setError(null)
   }, [newPlayerName, players])
-  
+
   // プレイヤー削除
   const removePlayer = useCallback((playerId: string) => {
-    setPlayers(prev => prev.filter(p => p.id !== playerId))
-    setCurrentRolls(prev => {
-      const newRolls = { ...prev }
-      const player = players.find(p => p.id === playerId)
-      if (player) delete newRolls[player.name]
-      return newRolls
+    setPlayers(prev => {
+      const player = prev.find(p => p.id === playerId)
+      if (player) {
+        setCurrentRolls(rolls => {
+          const newRolls = { ...rolls }
+          delete newRolls[player.name]
+          return newRolls
+        })
+      }
+      return prev.filter(p => p.id !== playerId)
     })
-  }, [players])
-  
-  // 寿司をランダムに選択する
+  }, [])
+
+  // 寿司をランダムに選択する（重み付き）
   const rollSushi = useCallback(() => {
     if (menuItems.length === 0) {
       setError('メニューデータが取得できていません')
       return
     }
-    
     if (players.length === 0) {
       setError('先にプレイヤーを追加してください')
       return
     }
-    
     setCurrentRolls(
       players.reduce((acc, player) => {
-        const randomItem = menuItems[Math.floor(Math.random() * menuItems.length)]
-        acc[player.name] = randomItem
+        acc[player.name] = weightedRandom(menuItems, categoryWeights)
         return acc
       }, {} as Record<string, MenuItem>)
     )
-  }, [menuItems, players])
-  
+  }, [menuItems, players, categoryWeights])
+
   // 寿司を選択する
   const selectSushi = useCallback((playerName: string) => {
     if (!currentRolls[playerName]) return
-    
-    setPlayers(prev => 
+    setPlayers(prev =>
       prev.map(player => {
-        if (player.name === playerName) {
-          const selectedItem = currentRolls[playerName]
-          return {
-            ...player,
-            orders: [...player.orders, selectedItem],
-            totalAmount: player.totalAmount + selectedItem.price
-          }
-        }
-        return player
+        if (player.name !== playerName) return player
+        const item = currentRolls[playerName]
+        return { ...player, orders: [...player.orders, item], totalAmount: player.totalAmount + item.price }
       })
     )
-    
     setCurrentRolls(prev => {
       const newRolls = { ...prev }
       delete newRolls[playerName]
       return newRolls
     })
   }, [currentRolls])
-  
+
   // 寿司をスキップする
   const skipSushi = useCallback((playerName: string) => {
     setCurrentRolls(prev => {
@@ -131,146 +178,206 @@ const RandomSushiGame = () => {
       return newRolls
     })
   }, [])
-  
-  // 初回ロード時のみlocalStorageから復元
+
+  // 初回ロード時にlocalStorageから復元
   useEffect(() => {
-    const savedPlayers = localStorage.getItem(LOCAL_STORAGE_KEY)
-    if (savedPlayers) {
-      setPlayers(JSON.parse(savedPlayers))
-    }
-    fetchMenu('つくば学園の森店')
-    // eslint-disable-next-line
+    const saved = localStorage.getItem(LOCAL_STORAGE_KEY)
+    if (saved) setPlayers(JSON.parse(saved))
   }, [])
-  
-  // playersが空でない場合のみlocalStorageに保存
+
+  // playersをlocalStorageに保存
   useEffect(() => {
     if (players.length > 0) {
       localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(players))
     }
   }, [players])
-  
+
   // ゲームリセット
   const resetGame = useCallback(() => {
     if (window.confirm('ゲームをリセットしますか？すべての注文履歴がクリアされます。')) {
-      setPlayers(prev =>
-        prev.map(player => ({
-          ...player,
-          orders: [],
-          totalAmount: 0
-        }))
-      )
+      setPlayers(prev => prev.map(p => ({ ...p, orders: [], totalAmount: 0 })))
       setCurrentRolls({})
-      localStorage.removeItem(LOCAL_STORAGE_KEY) // localStorageもクリア
+      localStorage.removeItem(LOCAL_STORAGE_KEY)
     }
   }, [])
-  
-  // 金額表示切り替え
-  const togglePlayerTotal = useCallback((playerId: string) => {
-    setPlayers(prev => 
-      prev.map(player => {
-        if (player.id === playerId) {
-          return { ...player, showTotal: !player.showTotal }
-        }
-        return player
-      })
-    )
-  }, [])
-  
-  // お会計/結果表示
+
+  // お会計
   const handleCheckout = useCallback(() => {
-    if (players.length === 0) {
-      setError('プレイヤーが追加されていません')
-      return
-    }
-    
-    if (players.every(p => p.orders.length === 0)) {
-      setError('まだ注文がありません')
-      return
-    }
-    
-    const resultData = players.map(player => ({
-      id: player.id,
-      playerName: player.name,
-      orders: player.orders,
-      totalAmount: player.totalAmount
-    }))
-    
+    if (players.length === 0) { setError('プレイヤーが追加されていません'); return }
+    if (players.every(p => p.orders.length === 0)) { setError('まだ注文がありません'); return }
+    const resultData = players.map(p => ({ id: p.id, playerName: p.name, orders: p.orders, totalAmount: p.totalAmount }))
     localStorage.setItem('sushiGameResults', JSON.stringify(resultData))
     router.push('/result')
   }, [players, router])
-  
-  // Enter キーでプレイヤー追加
+
   const handleKeyPress = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter') {
-      addPlayer()
-    }
+    if (e.key === 'Enter') addPlayer()
   }, [addPlayer])
-  
+
   return (
     <div className="random-sushi-game">
-      <div className="store-selector-container mb-6">
-        <div className="store-title">店舗: つくば学園の森店</div>
-        <p>※店舗は「つくば学園の森店」に固定されています。</p>
-        {isLoading && <div className="loading mt-2">メニューを読み込み中...</div>}
+
+      {/* 店舗選択 */}
+      <div className="store-selector-container">
+        <label className="block font-medium mb-2">店舗を選択</label>
+        <div className="relative" ref={suggestionsRef}>
+          <input
+            type="text"
+            value={storeInput}
+            onChange={e => handleStoreInputChange(e.target.value)}
+            onFocus={() => { if (suggestions.length > 0) setShowSuggestions(true) }}
+            placeholder="店舗名を入力（例: つくば）"
+            className="w-full"
+            aria-label="店舗名"
+          />
+          {showSuggestions && suggestions.length > 0 && (
+            <div className="absolute z-10 w-full bg-white border border-gray-300 rounded-lg shadow-lg max-h-52 overflow-y-auto mt-1 p-1 flex flex-col gap-1">
+              {suggestions.map(store => (
+                <div
+                  key={store.url}
+                  onMouseDown={() => selectStore(store)}
+                  className="px-4 py-3 border border-gray-200 rounded cursor-pointer hover:bg-blue-50 hover:border-blue-400 text-sm"
+                >
+                  {store.name}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+        {selectedStore && (
+          <p className="mt-1 text-sm text-green-700">選択中: {selectedStore.name}</p>
+        )}
+        {isLoading && <p className="mt-1 text-sm text-gray-500">メニューを読み込み中...</p>}
+        {selectedStore && !isLoading && menuItems.length > 0 && (
+          <p className="mt-1 text-sm text-gray-500">メニュー {menuItems.length} 品取得済み</p>
+        )}
       </div>
-      
+
+      <hr className="my-5 border-gray-100" />
+
+      {/* カテゴリ倍率 */}
+      <div>
+        <button
+          onClick={() => setShowWeights(v => !v)}
+          className="text-sm text-gray-500 hover:text-gray-700 underline"
+        >
+          {showWeights ? 'カテゴリ倍率を閉じる ▲' : 'カテゴリ倍率を設定する ▼'}
+        </button>
+        {showWeights && (
+          <div className="mt-3 p-4 border border-gray-200 rounded-lg bg-gray-50">
+            <table className="w-full text-sm">
+              <thead>
+                <tr>
+                  <th className="text-left font-medium pb-3 pr-4">カテゴリ</th>
+                  <th className="text-left font-medium pb-3">倍率</th>
+                </tr>
+              </thead>
+              <tbody>
+                {DEFAULT_CATEGORIES.map(cat => (
+                  <tr key={cat}>
+                    <td className="pr-4 py-2 whitespace-nowrap">{cat}</td>
+                    <td className="py-2">
+                      <input
+                        type="number"
+                        min={0}
+                        step={0.1}
+                        value={draftWeights[cat] ?? '1'}
+                        onChange={e => setDraftWeights(prev => ({ ...prev, [cat]: e.target.value }))}
+                        onBlur={e => {
+                          if (e.target.value === '' || isNaN(parseFloat(e.target.value))) {
+                            setDraftWeights(prev => ({ ...prev, [cat]: '1' }))
+                          }
+                        }}
+                        className="w-24"
+                      />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <div className="flex items-center gap-3 mt-4">
+              <button
+                onClick={() => {
+                  setCategoryWeights({ ...draftWeights })
+                  setWeightsApplied(true)
+                  setTimeout(() => setWeightsApplied(false), 2000)
+                }}
+                className="bg-blue-500 hover:bg-blue-600 text-white px-4 py-1 rounded text-sm"
+              >
+                適用
+              </button>
+              {weightsApplied && <span className="text-green-600 text-sm">✓ 適用しました</span>}
+            </div>
+            <p className="text-xs text-gray-400 mt-2">出現率をn倍にします</p>
+          </div>
+        )}
+      </div>
+
+      <hr className="my-5 border-gray-100" />
+
       {error && (
-        <div className="error-message bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">
+        <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-5">
           {error}
         </div>
       )}
-      
-      <div className="player-form flex mb-4">
+
+      {/* プレイヤー追加 */}
+      <div className="player-form flex gap-2 mb-5">
         <input
           type="text"
           value={newPlayerName}
           onChange={e => setNewPlayerName(e.target.value)}
           onKeyPress={handleKeyPress}
           placeholder="プレイヤー名を入力"
-          className="flex-grow p-2 border rounded mr-2"
+          className="flex-grow"
           aria-label="プレイヤー名"
+          style={{ margin: 0 }}
         />
-        <button 
+        <button
           onClick={addPlayer}
-          className="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded"
+          className="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded whitespace-nowrap"
+          style={{ margin: 0 }}
         >
-          プレイヤーを追加
+          追加
         </button>
       </div>
-      
-      <div className="game-controls flex mb-6 space-x-2">
-        <button 
+
+      {/* ゲームコントロール */}
+      <div className="game-controls flex gap-2 mb-6">
+        <button
           onClick={rollSushi}
           disabled={menuItems.length === 0 || players.length === 0}
-          className="bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded disabled:opacity-50"
+          className="bg-green-500 hover:bg-green-600 text-white px-5 py-2 rounded disabled:opacity-50"
+          style={{ margin: 0 }}
           aria-label="寿司を回す"
         >
           回す
         </button>
-        <button 
+        <button
           onClick={resetGame}
-          className="bg-yellow-500 hover:bg-yellow-600 text-white px-4 py-2 rounded"
+          className="bg-yellow-500 hover:bg-yellow-600 text-white px-5 py-2 rounded"
+          style={{ margin: 0 }}
         >
           リセット
         </button>
-        <button 
+        <button
           onClick={handleCheckout}
-          className="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded"
+          className="bg-red-500 hover:bg-red-600 text-white px-5 py-2 rounded"
+          style={{ margin: 0 }}
         >
           お会計
         </button>
       </div>
-      
-      <PlayerList 
+
+      <PlayerList
         players={players}
         currentRolls={currentRolls}
         onSelectSushi={selectSushi}
         onSkipSushi={skipSushi}
         onRemovePlayer={removePlayer}
-        onToggleTotal={togglePlayerTotal}
       />
     </div>
   )
 }
 
-export default RandomSushiGame 
+export default RandomSushiGame

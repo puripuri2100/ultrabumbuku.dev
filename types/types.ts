@@ -10,6 +10,8 @@ export interface MenuItem {
   name: string;
   /** 価格 */
   price: number;
+  /** カテゴリ */
+  category: string;
 }
 
 /**
@@ -24,8 +26,6 @@ export interface PlayerType {
   orders: MenuItem[];
   /** 合計金額 */
   totalAmount: number;
-  /** 金額表示するかどうか */
-  showTotal: boolean;
 }
 
 /**
