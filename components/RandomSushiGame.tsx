@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useRouter } from 'next/router'
-import { ref, onValue, set } from 'firebase/database'
+import { ref, onValue, set, remove, update } from 'firebase/database'
 import { getDb } from '../lib/firebase'
 import { PlayerType, MenuItem } from '../types/types'
 import PlayerList from './PlayerList'
@@ -108,13 +108,15 @@ const RandomSushiGame = () => {
 
   // Firebase リアルタイム同期
   useEffect(() => {
-    const unsubPlayers = onValue(ref(getDb(),'game/players'), snapshot => {
+    const unsubPlayers = onValue(ref(getDb(), 'game/players'), snapshot => {
       const val = snapshot.val()
       if (!val) { setPlayers([]); return }
-      const arr = Array.isArray(val) ? val : Object.values(val)
-      setPlayers(arr.map((p: PlayerType) => ({ ...p, orders: p.orders ?? [] })))
+      setPlayers(Object.values(val).map((p: unknown) => {
+        const player = p as PlayerType
+        return { ...player, orders: player.orders ?? [] }
+      }))
     })
-    const unsubRolls = onValue(ref(getDb(),'game/currentRolls'), snapshot => {
+    const unsubRolls = onValue(ref(getDb(), 'game/currentRolls'), snapshot => {
       setCurrentRolls(snapshot.val() ?? {})
     })
     return () => { unsubPlayers(); unsubRolls() }
@@ -127,8 +129,8 @@ const RandomSushiGame = () => {
       setError('同じ名前のプレイヤーが既に存在します')
       return
     }
-    const newPlayers = [...players, { id: Date.now().toString(), name: newPlayerName.trim(), orders: [], totalAmount: 0 }]
-    set(ref(getDb(),'game/players'), newPlayers)
+    const newPlayer: PlayerType = { id: Date.now().toString(), name: newPlayerName.trim(), orders: [], totalAmount: 0 }
+    set(ref(getDb(), `game/players/${newPlayer.id}`), { id: newPlayer.id, name: newPlayer.name, totalAmount: 0 })
     setNewPlayerName('')
     setError(null)
   }, [newPlayerName, players])
@@ -136,14 +138,9 @@ const RandomSushiGame = () => {
   // プレイヤー削除
   const removePlayer = useCallback((playerId: string) => {
     const player = players.find(p => p.id === playerId)
-    const newPlayers = players.filter(p => p.id !== playerId)
-    set(ref(getDb(),'game/players'), newPlayers.length > 0 ? newPlayers : null)
-    if (player) {
-      const newRolls = { ...currentRolls }
-      delete newRolls[player.name]
-      set(ref(getDb(),'game/currentRolls'), Object.keys(newRolls).length > 0 ? newRolls : null)
-    }
-  }, [players, currentRolls])
+    remove(ref(getDb(), `game/players/${playerId}`))
+    if (player) remove(ref(getDb(), `game/currentRolls/${player.name}`))
+  }, [players])
 
   // 寿司をランダムに選択する（重み付き）
   const rollSushi = useCallback(() => {
@@ -153,36 +150,38 @@ const RandomSushiGame = () => {
       acc[player.name] = weightedRandom(menuItems, categoryWeights)
       return acc
     }, {} as Record<string, MenuItem>)
-    set(ref(getDb(),'game/currentRolls'), newRolls)
+    set(ref(getDb(), 'game/currentRolls'), newRolls)
   }, [menuItems, players, categoryWeights])
 
   // 寿司を選択する
   const selectSushi = useCallback((playerName: string) => {
     if (!currentRolls[playerName]) return
     const item = currentRolls[playerName]
-    const newPlayers = players.map(player => {
-      if (player.name !== playerName) return player
-      return { ...player, orders: [...player.orders, item], totalAmount: player.totalAmount + item.price }
-    })
-    set(ref(getDb(),'game/players'), newPlayers)
-    const newRolls = { ...currentRolls }
-    delete newRolls[playerName]
-    set(ref(getDb(),'game/currentRolls'), Object.keys(newRolls).length > 0 ? newRolls : null)
+    const player = players.find(p => p.name === playerName)
+    if (!player) return
+    const updatedOrders = [...player.orders, item]
+    const updates: Record<string, unknown> = {
+      [`game/players/${player.id}/orders`]: updatedOrders,
+      [`game/players/${player.id}/totalAmount`]: player.totalAmount + item.price,
+      [`game/currentRolls/${playerName}`]: null,
+    }
+    update(ref(getDb()), updates)
   }, [currentRolls, players])
 
   // 寿司をスキップする
   const skipSushi = useCallback((playerName: string) => {
-    const newRolls = { ...currentRolls }
-    delete newRolls[playerName]
-    set(ref(getDb(),'game/currentRolls'), Object.keys(newRolls).length > 0 ? newRolls : null)
-  }, [currentRolls])
+    remove(ref(getDb(), `game/currentRolls/${playerName}`))
+  }, [])
 
   // ゲームリセット
   const resetGame = useCallback(() => {
     if (window.confirm('ゲームをリセットしますか？すべての注文履歴がクリアされます。')) {
-      const resetPlayers = players.map(p => ({ ...p, orders: [], totalAmount: 0 }))
-      set(ref(getDb(),'game/players'), resetPlayers.length > 0 ? resetPlayers : null)
-      set(ref(getDb(),'game/currentRolls'), null)
+      const updates: Record<string, unknown> = { 'game/currentRolls': null }
+      players.forEach(p => {
+        updates[`game/players/${p.id}/orders`] = null
+        updates[`game/players/${p.id}/totalAmount`] = 0
+      })
+      update(ref(getDb()), updates)
     }
   }, [players])
 
