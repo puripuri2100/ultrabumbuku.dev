@@ -238,6 +238,22 @@ const RandomSushiGame = () => {
         {selectedStore && !isLoading && menuItems.length > 0 && (
           <p className="mt-1 text-sm text-gray-500">メニュー {menuItems.length} 品取得済み</p>
         )}
+        {selectedStore && !isLoading && menuItems.length === 0 && error && (
+          <button
+            onClick={() => {
+              setError(null)
+              setIsLoading(true)
+              fetch(`/api/menu?storeName=${encodeURIComponent(selectedStore.name)}`)
+                .then(r => r.json())
+                .then(data => { setMenuItems(data); setIsLoading(false) })
+                .catch(() => { setError('メニューの取得中にエラーが発生しました'); setIsLoading(false) })
+            }}
+            className="mt-1 text-sm text-blue-500 hover:text-blue-700 underline"
+            style={{ margin: 0, background: 'none', boxShadow: 'none', padding: 0, fontWeight: 'normal' }}
+          >
+            再試行
+          </button>
+        )}
       </div>
 
       <hr className="my-5 border-gray-100" />
