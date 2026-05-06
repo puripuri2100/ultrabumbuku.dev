@@ -69,25 +69,6 @@ const RandomSushiGame = () => {
     }
   }, [allStores])
 
-  // メニューを取得する（内部用）
-  const fetchMenu = useCallback(async (store: Store) => {
-    setMenuItems([])
-    setError(null)
-    setIsLoading(true)
-    try {
-      const response = await fetch(`/api/menu?storeName=${encodeURIComponent(store.name)}`)
-      const data = await response.json()
-      if (response.ok) {
-        setMenuItems(data)
-      } else {
-        setError(data.error || 'メニューの取得に失敗しました')
-      }
-    } catch {
-      setError('メニューの取得中にエラーが発生しました')
-    } finally {
-      setIsLoading(false)
-    }
-  }, [])
 
   // 店舗を選択して Firebase に保存 → 全クライアントが同期
   const selectStore = useCallback((store: Store) => {
@@ -117,7 +98,12 @@ const RandomSushiGame = () => {
       if (!store) return
       setSelectedStore(store)
       setStoreInput(store.name)
-      fetchMenu(store)
+      setMenuItems([])
+      setIsLoading(true)
+      fetch(`/api/menu?storeName=${encodeURIComponent(store.name)}`)
+        .then(r => r.json())
+        .then(data => { setMenuItems(data); setIsLoading(false) })
+        .catch(() => { setError('メニューの取得中にエラーが発生しました'); setIsLoading(false) })
     })
     const unsubPlayers = onValue(ref(getDb(), 'game/players'), snapshot => {
       const val = snapshot.val()
@@ -130,8 +116,14 @@ const RandomSushiGame = () => {
     const unsubRolls = onValue(ref(getDb(), 'game/currentRolls'), snapshot => {
       setCurrentRolls(snapshot.val() ?? {})
     })
-    return () => { unsubStore(); unsubPlayers(); unsubRolls() }
-  }, [fetchMenu])
+    const unsubWeights = onValue(ref(getDb(), 'game/categoryWeights'), snapshot => {
+      const val = snapshot.val()
+      if (!val) return
+      setCategoryWeights(val)
+      setDraftWeights(val)
+    })
+    return () => { unsubStore(); unsubPlayers(); unsubRolls(); unsubWeights() }
+  }, [])
 
   // プレイヤー追加
   const addPlayer = useCallback(() => {
@@ -293,7 +285,7 @@ const RandomSushiGame = () => {
             <div className="flex items-center gap-3 mt-4">
               <button
                 onClick={() => {
-                  setCategoryWeights({ ...draftWeights })
+                  set(ref(getDb(), 'game/categoryWeights'), { ...draftWeights })
                   setWeightsApplied(true)
                   setTimeout(() => setWeightsApplied(false), 2000)
                 }}
